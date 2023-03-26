@@ -1,0 +1,11 @@
+Still to do:
+
+* Proper event loop (selectors module?) supporting waiting on multiple FDs
+
+* Listen for other DALI traffic and react to it
+
+* Further options to configure DALI devices (min/max level etc.)
+
+* Deal with fade times and transitions
+
+* Support emergency units

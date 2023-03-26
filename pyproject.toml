@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "dali2hass"
+version = "0.1.0"
+description = "Connect a DALI installation to Home Assistant"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+authors = ["Stephen Early <sde@individualpubs.co.uk>"]
+packages = [
+    {include = "dali2hass"},
+]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+python-dali = ">=0.10"
+tomli = "^2.0"
+voluptuous = ">=0.13"
+paho-mqtt = ">1.6"
+
+[tool.poetry.dev-dependencies]
+
+[tool.poetry.scripts]
+dali2hass = "dali2hass.cmdline:main"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
