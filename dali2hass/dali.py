@@ -231,15 +231,19 @@ class Light:
                     return
             if 7 in dts:
                 # This is a relay — on/off output only
-                self.log.debug("is a relay, no brightness")
+                self.log.debug("is a relay, no brightness support")
+                self.supports_brightness = False
+            # XXX deal with the device failing to respond here...
+            self.physical_minimum = \
+                b.send(QueryPhysicalMinimum(self.address)).value
+            if self.physical_minimum == 254:
+                # Supported levels are 254 or 0 only
+                self.log.debug("physical min is 254, no brightness support")
                 self.supports_brightness = False
             # The config can override the supports_brightness flag:
             if "brightness" in self.config:
                 self.log.debug("brightness support override in config")
                 self.supports_brightness = self.config["brightness"]
-            # XXX deal with the device failing to respond here...
-            self.physical_minimum = \
-                b.send(QueryPhysicalMinimum(self.address)).value
             self.min_level = b.send(QueryMinLevel(self.address)).value
             self.max_level = b.send(QueryMaxLevel(self.address)).value
             self.current_level = b.send(QueryActualLevel(self.address)).value
