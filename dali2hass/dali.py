@@ -306,8 +306,10 @@ class Light:
         }
         if self.supports_brightness and self.current_level > 0:
             sd["brightness"] = self.current_level
-        self.light_entity.set_state(sd)
-        self.lamp_failure_entity.set_state(self.lamp_failure)
+        if self.light_entity:
+            self.light_entity.set_state(sd)
+        if self.lamp_failure_entity:
+            self.lamp_failure_entity.set_state(self.lamp_failure)
 
     def send_cmd(self, command):
         if self.bridge.dry_run:
