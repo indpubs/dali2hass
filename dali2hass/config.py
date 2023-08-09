@@ -15,6 +15,8 @@ SCHEMA = vol.Schema(
                 extra=True,
             ),
             vol.Optional("poll_interval", default=60.0): float,
+            vol.Optional("groups", default="off"): vol.Any(
+                "off", "min", "average", "max"),
             vol.Optional("gear", default={}): dict,
         },
         vol.Required("homeassistant"): {

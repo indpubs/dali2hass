@@ -9,7 +9,7 @@ from .hass import (
     LightEntity,
 )
 from .drivers import available_drivers
-from dali.address import Broadcast, Short
+from dali.address import Broadcast, Short, GearGroup
 from dali.gear import emergency
 from dali.gear.general import (
     QueryControlGearPresent,
@@ -25,14 +25,14 @@ from dali.gear.general import (
     QueryMaxLevel,
     GoToScene,
 )
-from dali.sequences import QueryDeviceTypes
+from dali.sequences import QueryDeviceTypes, QueryGroups
 from dali.exceptions import DALISequenceError
 
 log = logging.getLogger(__name__)
 
 
 class Bridge:
-    def __init__(self, config, hass, dry_run=False):
+    def __init__(self, config, hass, dry_run=False, max_address=63):
         self.log = log
         self.hass = hass
         self.dry_run = dry_run
@@ -41,10 +41,14 @@ class Bridge:
         self.prefix = config["mqtt_prefix"]
         self.poll_interval = config["poll_interval"]
         self.gear_config = config["gear"]
+        self.group_mode = config["groups"]
+        self.groups_supported = self.group_mode != "off"
         driver = available_drivers.get(config["bus"]["driver"])
         if not driver:
             raise Exception("Unknown driver")
         self.bus = driver(config["bus"])
+
+        self.has_emergency_units = False
 
         # Command topics will follow this pattern:
         self.hass.register_command_pattern(
@@ -70,28 +74,22 @@ class Bridge:
             self.bridge_device,
             self.make_command_topic("rescan"), self.rescan_cmd,
             device_class="restart", category="config"))
-        self.hass.register_entity(ButtonEntity(
-            self.make_uid("inhibit"),
-            "Inhibit emergency lighting for 15 minutes",
-            self.bridge_device,
-            self.make_command_topic("inhibit"), self.inhibit_cmd,
-            category="config"))
-        self.hass.register_entity(ButtonEntity(
-            self.make_uid("reset_inhibit"), "Re-enable emergency lighting",
-            self.bridge_device,
-            self.make_command_topic("reset_inhibit"), self.reset_inhibit_cmd,
-            category="config"))
 
         # Scenes
         self.scene_entities = {}
 
+        # Groups
+        self.groups = {}
+
         # Lights
-        self.lights = [Light(x, self) for x in range(64)]
+        self.lights = [Light(x, self) for x in range(max_address + 1)]
 
         for light in self.lights:
             self.hass.register_task(light)
 
-        self.update_status()
+        self.update_status("Starting")
+        self.init_complete = False
+        self.hass.register_idle_task(self.idle)
 
     def update_status(self, message=None):
         if message:
@@ -121,6 +119,28 @@ class Bridge:
             lambda: self.scene_cmd(scene))
         self.hass.register_entity(self.scene_entities[scene])
 
+    def add_to_group(self, group, light):
+        if group not in self.groups:
+            self.groups[group] = Group(group, self)
+        self.groups[group].add_member(light)
+        return self.groups[group]
+
+    def add_emergency_unit(self):
+        if self.has_emergency_units:
+            return
+        self.has_emergency_units = True
+        self.hass.register_entity(ButtonEntity(
+            self.make_uid("inhibit"),
+            "Inhibit emergency lighting for 15 minutes",
+            self.bridge_device,
+            self.make_command_topic("inhibit"), self.inhibit_cmd,
+            category="config"))
+        self.hass.register_entity(ButtonEntity(
+            self.make_uid("reset_inhibit"), "Re-enable emergency lighting",
+            self.bridge_device,
+            self.make_command_topic("reset_inhibit"), self.reset_inhibit_cmd,
+            category="config"))
+
     def scene_cmd(self, scene):
         self.log.debug("Go to scene %d", scene)
         if not self.dry_run:
@@ -146,6 +166,71 @@ class Bridge:
             with self.bus as b:
                 b.send(emergency.ReLightResetInhibit(Broadcast()))
 
+    def idle(self):
+        if self.init_complete:
+            return
+        self.init_complete = True
+        if self.groups_supported:
+            for group in self.groups.values():
+                group.announce()
+        self.update_status()
+
+
+class Group:
+    def __init__(self, address, bridge):
+        self.log = log.getChild(f"Group({address})")
+        self.log.debug("created")
+        self.address = GearGroup(address)
+        self.number = address
+        self.bridge = bridge
+        self.members = set()
+        self.uid = f"group_{address}"
+        # Home Assistant will add the device name to the entity name
+        # automatically
+        self.name = f"Group {address}"
+        # Group has a minimum and maximum level — the lowest minimum
+        # and highest maximum of all its members. It doesn't have a
+        # physical minimum.
+        #
+        # Group supports brightness if any of its members support
+        # brightness.
+        #
+        # Group brightness is determined by group mode:
+        #  - min: the lowest brightness of any member
+        #  - average: the average brightness of all members
+        #  - max: the maximum brightness of any member
+
+        # We defer creating an entity until we know about all our members
+        # and whether they support brightness
+        self.light_entity = None
+        self.supports_brightness = False
+        self.min_level = 254
+        self.max_level = 1
+
+    def announce(self):
+        self.light_entity = LightEntity(
+            self.bridge.make_uid(self.uid),
+            self.name,
+            self.bridge.bridge_device,
+            self.bridge.make_command_topic(self.uid),
+            self.bridge.make_state_topic(self.uid),
+            self.command,
+            brightness_scale=self.max_level
+            if self.supports_brightness else None,
+            icon="mdi:lightbulb-group")
+        self.bridge.hass.register_entity(self.light_entity)
+
+    def add_member(self, light):
+        self.log.debug("added light at address %s", light.number)
+        self.members.add(light)
+        if light.supports_brightness:
+            self.supports_brightness = True
+        self.min_level = min(self.min_level, light.min_level)
+        self.max_level = max(self.max_level, light.max_level)
+
+    def command(self, sd):
+        self.log.debug("group command %s", sd)
+
 
 class Light:
     def __init__(self, address, bridge):
@@ -158,6 +243,7 @@ class Light:
         self.is_light = False
         self.last_update = time.time()
         self.scenes = {}
+        self.groups = []
         self.physical_minimum = None
         self.min_level = None
         self.max_level = None
@@ -224,6 +310,7 @@ class Light:
             if 1 in dts:
                 # It's an emergency unit.
                 self.log.debug("is emergency unit")
+                self.bridge.add_emergency_unit()
                 features = b.send(
                     emergency.QueryEmergencyFeatures(self.address))
                 if not features.switched_maintained_control_gear:
@@ -264,6 +351,10 @@ class Light:
                     self.scenes[scene] = sl
                     self.bridge.add_scene(scene)
 
+            if self.bridge.groups_supported:
+                self.groups = [self.bridge.add_to_group(g, self)
+                               for g in b.send(QueryGroups(self.address))]
+
             if not self.device:
                 self.device = Device(
                     identifiers=[self.bridge.make_uid(self.uid)],
@@ -275,7 +366,7 @@ class Light:
             if not self.light_entity:
                 self.light_entity = LightEntity(
                     self.bridge.make_uid(self.uid),
-                    self.name,
+                    None,  # Entity will be given the Device Name by hass
                     self.device,
                     self.bridge.make_command_topic(self.uid),
                     self.bridge.make_state_topic(self.uid),
@@ -372,3 +463,13 @@ class Light:
             self.current_level = new_level
             self.last_update = time.time()
             self.update_state()
+
+    def notify_group_action(self, new_level):
+        # A command has been sent to a group of which this light is a
+        # member; the command will result in us transitioning to the
+        # specified new level
+        if new_level == 0 and self.current_level != 0:
+            self.previous_active_level = self.current_level
+        self.current_level = new_level
+        self.last_update = time.time()
+        self.update_state()

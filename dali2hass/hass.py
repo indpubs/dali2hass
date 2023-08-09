@@ -109,9 +109,12 @@ class SceneEntity(Entity):
         self.discovery_payload.update({
             "enabled_by_default": enabled_by_default,
             "command_topic": self.command_topic,
-            "entity_category": category,
             "payload_on": "ON",
         })
+        # Setting category=None is now rejected by Home Assistant. Don't
+        # set it at all for primary entities.
+        if category:
+            self.discovery_payload['category'] = category
 
     def command(self, payload):
         self.callback()
@@ -119,7 +122,7 @@ class SceneEntity(Entity):
 
 class LightEntity(Entity):
     def __init__(self, unique_id, name, device, command_topic, state_topic,
-                 callback, brightness_scale=None):
+                 callback, brightness_scale=None, icon=None):
         super().__init__(unique_id, name, device, "light")
         self.state_topic = state_topic
         self.state = None
@@ -134,6 +137,10 @@ class LightEntity(Entity):
         if brightness_scale is not None:
             self.discovery_payload.update({
                 "brightness_scale": brightness_scale,
+            })
+        if icon:
+            self.discovery_payload.update({
+                "icon": icon,
             })
 
     def set_state(self, state):
@@ -150,7 +157,7 @@ class HomeAssistant:
     def __init__(self, config):
         self._config = config
         self.mqttc = mqtt.Client(client_id=config["mqtt_client_id"])
-        if config["mqtt_username"]:
+        if "mqtt_username" in config and "mqtt_password" in config:
             self.mqttc.username_pw_set(
                 config["mqtt_username"], config["mqtt_password"])
         self.connected = False
@@ -160,6 +167,7 @@ class HomeAssistant:
         self.command_patterns = []
         self.command_topics = {}
         self.tasks = []
+        self.idle_tasks = []
         self.pending_state_messages = []
         self.mqttc.connect_async(
             config["mqtt_hostname"], port=config["mqtt_port"])
@@ -190,6 +198,9 @@ class HomeAssistant:
 
     def register_task(self, task):
         self.tasks.append(task)
+
+    def register_idle_task(self, task):
+        self.idle_tasks.append(task)
 
     def will_set(self, topic, payload):
         self.mqttc.will_set(topic, payload)
@@ -273,6 +284,10 @@ class HomeAssistant:
                     else:
                         timeout = min(self.pending_state_messages[0][0] - now,
                                       timeout)
+                # If timeout is greater than zero then we are idle
+                if timeout > 0.0:
+                    for t in self.idle_tasks:
+                        t()
                 rc = self.mqttc.loop(timeout=timeout)
                 if rc == mqtt.MQTT_ERR_CONN_LOST:
                     self.connected = False
